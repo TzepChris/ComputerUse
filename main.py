@@ -91,34 +91,50 @@ class App:
             
         self.emergency_root = tk.Toplevel(self.root)
         self.emergency_root.attributes("-topmost", True)
-        self.emergency_root.overrideredirect(True) # Remove title bar for a cleaner look
+        self.emergency_root.overrideredirect(True)
+        
+        # Use Windows-specific transparency trick for rounded corners
+        bg_transparent = '#000001' # Very specific color to make transparent
+        self.emergency_root.config(bg=bg_transparent)
+        self.emergency_root.attributes("-transparentcolor", bg_transparent)
         
         # Position at top center
         screen_width = self.emergency_root.winfo_screenwidth()
-        w, h = 250, 60
+        w, h = 320, 70
         x = (screen_width // 2) - (w // 2)
-        y = 0
+        y = 20
         self.emergency_root.geometry(f"{w}x{h}+{x}+{y}")
         
-        # Styled panic button
-        btn = tk.Button(
-            self.emergency_root,
-            text="🛑 EMERGENCY STOP",
-            bg="#ff3333",
-            fg="white",
-            font=("Arial", 14, "bold"),
-            command=self.toggle_agent,
-            activebackground="#cc0000",
-            activeforeground="white",
-            cursor="hand2",
-            relief=tk.FLAT,
-            bd=0
-        )
-        btn.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(self.emergency_root, width=w, height=h, bg=bg_transparent, highlightthickness=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
         
-        # Add a small white border at the bottom
-        border = tk.Frame(self.emergency_root, height=2, bg="white")
-        border.pack(fill=tk.X, side=tk.BOTTOM)
+        # Color matching the provided image
+        color_normal = "#F24E5C" 
+        color_hover = "#F56E7A"
+        
+        # Draw rounded rectangle
+        radius = 30
+        def create_rounded_rect(x1, y1, x2, y2, r, **kwargs):
+            points = [x1+r, y1, x1+r, y1, x2-r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y1+r, x2, y2-r, x2, y2-r, x2, y2, x2-r, y2, x2-r, y2, x1+r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y2-r, x1, y1+r, x1, y1+r, x1, y1]
+            return canvas.create_polygon(points, **kwargs, smooth=True)
+
+        self.rect = create_rounded_rect(5, 5, w-5, h-5, radius, fill=color_normal)
+        self.text = canvas.create_text(w//2, h//2, text="🛑  EMERGENCY STOP  🛑", fill="white", font=("Segoe UI", 14, "bold"))
+        
+        def on_click(e):
+            self.toggle_agent()
+            
+        def on_enter(e):
+            canvas.itemconfig(self.rect, fill=color_hover)
+            
+        def on_leave(e):
+            canvas.itemconfig(self.rect, fill=color_normal)
+            
+        # Bind events to both shape and text
+        for item in (self.rect, self.text):
+            canvas.tag_bind(item, "<Button-1>", on_click)
+            canvas.tag_bind(item, "<Enter>", on_enter)
+            canvas.tag_bind(item, "<Leave>", on_leave)
 
     def hide_emergency_stop(self):
         if self.emergency_root:

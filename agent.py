@@ -15,6 +15,7 @@ from tools import (
     click_and_hold, shift_click, ctrl_click, alt_click,
     maximize_active_window, open_app, run_shell_command
 )
+from ui_inspector import get_ui_tree_summary
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -112,6 +113,12 @@ The screen has a red 10x10 grid overlay to help you align clicks.
 ALWAYS aim for the CENTER of the icon, not the edge.
 If you are unsure, you can verify by checking the surrounding grid lines.
 
+UI METADATA:
+You will receive a list of "Detected UI Elements" which includes names, types, and coordinates.
+Use these coordinates for high precision clicking. If the UI metadata says a button "Submit" is at (500, 300), 
+prefer using CLICK(500, 300) over guessing based on the grid lines. 
+The metadata is especially useful when the screen text is blurry or for identifying icon-only buttons.
+
 Format your response CONCISELY:
 REASONING: [One sentence max]
 ACTION: [Action1]
@@ -146,6 +153,11 @@ class ComputerUseAgent:
     def __init__(self, api_keys=None, model_name='gemini-3-flash-preview'):
         self.api_keys = api_keys or {}
         self.model_name = model_name
+        self.usage_file = "api_usage.json"
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.total_cost = 0.0
+        self.load_usage()
         
         if 'gemini' in self.api_keys:
             genai.configure(api_key=self.api_keys['gemini'])
@@ -162,6 +174,30 @@ class ComputerUseAgent:
         
         self.width, self.height = get_screen_size()
         self.should_stop = False
+
+    def load_usage(self):
+        import json
+        if os.path.exists(self.usage_file):
+            try:
+                with open(self.usage_file, 'r') as f:
+                    data = json.load(f)
+                    self.total_input_tokens = data.get("total_input_tokens", 0)
+                    self.total_output_tokens = data.get("total_output_tokens", 0)
+                    self.total_cost = data.get("total_cost", 0.0)
+            except Exception as e:
+                print(f"Error loading usage file: {e}")
+
+    def save_usage(self):
+        import json
+        try:
+            with open(self.usage_file, 'w') as f:
+                json.dump({
+                    "total_input_tokens": self.total_input_tokens,
+                    "total_output_tokens": self.total_output_tokens,
+                    "total_cost": self.total_cost
+                }, f, indent=4)
+        except Exception as e:
+            print(f"Error saving usage file: {e}")
 
     def stop(self):
         self.should_stop = True
@@ -222,6 +258,23 @@ class ComputerUseAgent:
         
         return img
 
+    def _track_usage(self, response, log_func):
+        if hasattr(response, 'usage_metadata'):
+            usage = response.usage_metadata
+            input_tokens = usage.prompt_token_count
+            output_tokens = usage.candidates_token_count
+            
+            # Gemini 3 Pricing from screen: $0.50/1M input, $3.00/1M output
+            current_cost = (input_tokens / 1_000_000) * 0.50 + (output_tokens / 1_000_000) * 3.00
+            
+            self.total_input_tokens += input_tokens
+            self.total_output_tokens += output_tokens
+            self.total_cost += current_cost
+            self.save_usage()
+            
+            log_func(f"  [Usage] Input: {input_tokens}, Output: {output_tokens}, Cost: ${current_cost:.5f}")
+            log_func(f"  [Total Usage] Input: {self.total_input_tokens}, Output: {self.total_output_tokens}, Total Cost: ${self.total_cost:.5f}")
+
     def run_task(self, user_instruction, logger=None):
         def log(msg):
             if logger:
@@ -262,6 +315,12 @@ class ComputerUseAgent:
                 capture_end = time.perf_counter()
                 log(f"  [Time] Screen capture: {capture_end - capture_start:.3f}s")
 
+                log("Extracting UI metadata...")
+                ui_metadata_start = time.perf_counter()
+                ui_metadata = get_ui_tree_summary()
+                ui_metadata_end = time.perf_counter()
+                log(f"  [Time] UI Metadata: {ui_metadata_end - ui_metadata_start:.3f}s")
+
                 # Check whether previous turn's actions actually changed the screen
                 try:
                     current_hash = _ahash(img)
@@ -282,7 +341,7 @@ class ComputerUseAgent:
                 user_message = {
                     "role": "user", 
                     "parts": [
-                        f"Task: {user_instruction}\n\nCurrent screen state is attached. What are the next actions?",
+                        f"Task: {user_instruction}\n\n{ui_metadata}\n\nCurrent screen state is attached. What are the next actions?",
                         img
                     ]
                 }
@@ -337,6 +396,7 @@ class ComputerUseAgent:
                                 messages,
                                 request_options={"timeout": 60}
                             )
+                            self._track_usage(response, log)
                         except Exception as e:
                             error_str = str(e).lower()
                             if "404" in str(e) and self.model_name == 'gemini-3-flash-preview':
@@ -344,11 +404,13 @@ class ComputerUseAgent:
                                 self.model_name = 'gemini-2.0-flash'
                                 self.model = genai.GenerativeModel(self.model_name, generation_config={"temperature": 0.0})
                                 response = self.model.generate_content(messages, request_options={"timeout": 60})
+                                self._track_usage(response, log)
                             elif "timeout" in error_str or "deadline" in error_str:
                                 log("API timeout - retrying with minimal context...")
                                 # Retry with only system prompt and current screenshot
                                 minimal_messages = [messages[0], messages[-1]]
                                 response = self.model.generate_content(minimal_messages, request_options={"timeout": 60})
+                                self._track_usage(response, log)
                             else:
                                 raise e
                         response_text = response.text
