@@ -1,0 +1,9 @@
+google-generativeai
+openai
+pyautogui
+pillow
+python-dotenv
+mss
+keyboard
+pyperclip
+together
