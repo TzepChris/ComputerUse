@@ -15,7 +15,7 @@ from tools import (
     click_and_hold, shift_click, ctrl_click, alt_click,
     maximize_active_window, open_app, run_shell_command
 )
-from ui_inspector import get_ui_tree_summary
+from ui_inspector import get_ui_tree_summary, get_foreground_window_rect
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -30,17 +30,32 @@ Your goal is to help the user with their tasks by seeing the screen and performi
 Available actions:
 
 MOUSE ACTIONS:
-- CLICK(x, y): Left click at normalized coordinates (x, y).
-- DOUBLE_CLICK(x, y): Double click at normalized coordinates (x, y). Good for opening files/apps.
-- TRIPLE_CLICK(x, y): Triple click to select an entire line or paragraph.
-- RIGHT_CLICK(x, y): Right click to open context menus.
-- MIDDLE_CLICK(x, y): Middle click (opens links in new tab, paste in some terminals).
-- MOVE_MOUSE(x, y): Move mouse without clicking (for hover effects, tooltips, dropdown menus).
-- CLICK_AND_HOLD(x, y, duration): Click and hold for specified seconds (for drag menus, long press).
-- SHIFT_CLICK(x, y): Shift+Click for range selection (select from last click to this point).
-- CTRL_CLICK(x, y): Ctrl+Click for multi-selection or opening links in new tabs.
-- ALT_CLICK(x, y): Alt+Click for special interactions.
-- DRAG(x1, y1, x2, y2): Drag from (x1, y1) to (x2, y2). Good for moving windows, selecting text.
+- CLICK(x, y): Left click at normalized coordinates (x, y) relative to the ATTACHED SCREENSHOT.
+- DOUBLE_CLICK(x, y): Double click at normalized coordinates (x, y) relative to the ATTACHED SCREENSHOT.
+- TRIPLE_CLICK(x, y): Triple click to select an entire line or paragraph relative to the ATTACHED SCREENSHOT.
+- RIGHT_CLICK(x, y): Right click to open context menus relative to the ATTACHED SCREENSHOT.
+- MIDDLE_CLICK(x, y): Middle click relative to the ATTACHED SCREENSHOT.
+- MOVE_MOUSE(x, y): Move mouse without clicking relative to the ATTACHED SCREENSHOT.
+- CLICK_AND_HOLD(x, y, duration): Click and hold at (x, y) relative to the ATTACHED SCREENSHOT.
+- SHIFT_CLICK(x, y): Shift+Click at (x, y) relative to the ATTACHED SCREENSHOT.
+- CTRL_CLICK(x, y): Ctrl+Click at (x, y) relative to the ATTACHED SCREENSHOT.
+- ALT_CLICK(x, y): Alt+Click at (x, y) relative to the ATTACHED SCREENSHOT.
+- DRAG(x1, y1, x2, y2): Drag from (x1, y1) to (x2, y2) relative to the ATTACHED SCREENSHOT.
+
+FULL-SCREEN COORDINATE OVERRIDES (use ONLY when you need to click outside the attached screenshot):
+- CLICK_SCREEN(x, y)
+- DOUBLE_CLICK_SCREEN(x, y)
+- TRIPLE_CLICK_SCREEN(x, y)
+- RIGHT_CLICK_SCREEN(x, y)
+- MIDDLE_CLICK_SCREEN(x, y)
+- MOVE_MOUSE_SCREEN(x, y)
+- CLICK_AND_HOLD_SCREEN(x, y, duration)
+- SHIFT_CLICK_SCREEN(x, y)
+- CTRL_CLICK_SCREEN(x, y)
+- ALT_CLICK_SCREEN(x, y)
+- DRAG_SCREEN(x1, y1, x2, y2)
+- SCROLL_AT_SCREEN(x, y, amount)
+- CLEAR_FIELD_SCREEN(x, y)
 
 SCROLL ACTIONS:
 - SCROLL(amount): Scroll the mouse wheel at current position. Positive for up, negative for down. Use values like 3, 5, -3, -5.
@@ -105,9 +120,9 @@ WINDOWS SHORTCUTS (use these instead of searching):
 - Close window: HOTKEY('alt', 'f4')
 - Switch windows: HOTKEY('alt', 'tab')
 
-Coordinates: Use normalized coordinates from 0 to 1000. 
-(0, 0) is top-left, (1000, 1000) is bottom-right.
-The screen has a red 10x10 grid overlay to help you align clicks.
+Coordinates: Use normalized coordinates from 0 to 1000 relative to the ATTACHED SCREENSHOT.
+(0, 0) is top-left of the screenshot; (1000, 1000) is bottom-right of the screenshot.
+The screenshot has a red 10x10 grid overlay to help you align clicks.
 - Center of grid cells: 50, 150, 250... 950.
 - Grid lines are at 100, 200... 900.
 ALWAYS aim for the CENTER of the icon, not the edge.
@@ -115,15 +130,16 @@ If you are unsure, you can verify by checking the surrounding grid lines.
 
 UI METADATA:
 You will receive a list of "Detected UI Elements" which includes names, types, and coordinates.
-Use these coordinates for high precision clicking. If the UI metadata says a button "Submit" is at (500, 300), 
-prefer using CLICK(500, 300) over guessing based on the grid lines. 
+If the screenshot is CROPPED to the foreground window (we will explicitly note this), then window=(x,y) matches the screenshot coords: prefer CLICK(x,y).
+If the screenshot is NOT cropped (full screen), use screen=(x,y) with CLICK(x,y) (since the screenshot is the full screen).
+Only use *_SCREEN actions if you must click outside the attached screenshot region.
 The metadata is especially useful when the screen text is blurry or for identifying icon-only buttons.
 
 Format your response CONCISELY:
-REASONING: [One sentence max]
 ACTION: [Action1]
 ACTION: [Action2]
 ...
+REASONING: [Optional, one sentence max]
 
 Output multiple ACTIONs when they can be performed in sequence without seeing the screen.
 Do NOT use WAIT unless the UI truly needs time to load (e.g., after opening an app).
@@ -131,6 +147,15 @@ Do NOT use WAIT unless the UI truly needs time to load (e.g., after opening an a
 
 # Maximum context messages to keep (system prompt + recent exchanges)
 MAX_CONTEXT_MESSAGES = 5
+
+# Performance features (tunable)
+CROP_TO_FOREGROUND_WINDOW = True  # smaller screenshot region => faster VLM
+ENABLE_FAST_PATH = True           # run deterministic steps without calling the LLM
+ENABLE_TEXT_ONLY_FIRST = False    # optional: try a text-only call before sending an image
+GEMINI_STREAM_ACTIONS = False     # experimental: execute actions while streaming output
+
+# Upload-size cap for screenshots (smaller => faster upload/processing)
+MAX_IMAGE_WIDTH = 768  # reduced from 1024 for speed
 
 def _ahash(image: Image.Image, hash_size: int = 8) -> int:
     """
@@ -174,6 +199,81 @@ class ComputerUseAgent:
         
         self.width, self.height = get_screen_size()
         self.should_stop = False
+        # Capture context for mapping screenshot-relative coords back to screen coords.
+        self._capture_context = None
+
+    def _is_non_ascii(self, s: str) -> bool:
+        return any(ord(ch) > 127 for ch in s)
+
+    def _extract_url(self, text: str):
+        import re
+        m = re.search(r"(https?://\\S+)", text or "", re.IGNORECASE)
+        if not m:
+            return None
+        return m.group(1).rstrip(").,;\\\"'")
+
+    def _extract_spotify_query(self, text: str):
+        import re
+        t = (text or "").strip()
+        m = re.search(r"search\\s+(?:song\\s*)?[:\\-]?\\s*(.+?)(?:\\s+and\\s+|$)", t, re.IGNORECASE)
+        if not m:
+            return None
+        q = m.group(1).strip().strip("'\\\"")
+        if len(q) < 2:
+            return None
+        return q
+
+    def _fast_path_actions(self, user_instruction: str):
+        """
+        Return a list of ACTION lines to execute before calling the LLM, or None.
+        These are safe, deterministic steps that commonly precede interactive work.
+        """
+        if not ENABLE_FAST_PATH:
+            return None
+
+        instruction = user_instruction or ""
+        t = instruction.lower()
+
+        url = self._extract_url(instruction)
+        if url:
+            return [
+                "ACTION: OPEN_APP('chrome')",
+                "ACTION: MAXIMIZE_WINDOW()",
+                "ACTION: HOTKEY('ctrl','l')",
+                f"ACTION: TYPE('{url}')",
+                "ACTION: PRESS('enter')",
+            ]
+
+        if "spotify" in t:
+            actions = [
+                "ACTION: OPEN_APP('spotify')",
+                "ACTION: MAXIMIZE_WINDOW()",
+            ]
+
+            # Toggle play/pause via Space in Spotify desktop
+            if any(k in t for k in ("pause", "resume", "play")) and "search" not in t:
+                actions.append("ACTION: PRESS('space')")
+                return actions
+
+            query = self._extract_spotify_query(instruction)
+            if query:
+                actions.append("ACTION: HOTKEY('ctrl','l')")
+                if self._is_non_ascii(query):
+                    actions.append(f"ACTION: TYPE_UNICODE('{query}')")
+                else:
+                    actions.append(f"ACTION: TYPE('{query}')")
+                actions.append("ACTION: PRESS('enter')")
+                return actions
+
+        return None
+
+    def _response_has_actions(self, response_text: str) -> bool:
+        if not response_text:
+            return False
+        for line in response_text.splitlines():
+            if line.strip().upper().startswith("ACTION:"):
+                return True
+        return False
 
     def load_usage(self):
         import json
@@ -223,40 +323,109 @@ class ComputerUseAgent:
             )
         # For Grok, we use the xai_client directly in generate_content
 
-    def capture_screen(self, sct):
-        # Capture the entire screen using the provided mss instance
+    def capture_screen(self, sct, crop_rect=None):
+        """
+        Capture either the full primary monitor, or (optionally) a cropped region.
+        Returns (PIL.Image, capture_context dict).
+
+        crop_rect is expected as a dict like:
+          {left, top, width, height}
+        typically from UIAutomation's BoundingRectangle (desktop coordinates).
+        """
         monitor = sct.monitors[1]
-        screenshot = sct.grab(monitor)
-        
+        region = monitor
+
+        # Default capture context assumes full monitor
+        image_left = int(monitor.get("left", 0))
+        image_top = int(monitor.get("top", 0))
+        image_width = int(monitor["width"])
+        image_height = int(monitor["height"])
+
+        # Optionally crop to the foreground window for speed
+        if crop_rect and CROP_TO_FOREGROUND_WINDOW:
+            try:
+                cl = int(crop_rect.get("left", 0))
+                ct = int(crop_rect.get("top", 0))
+                cw = int(crop_rect.get("width", 0))
+                ch = int(crop_rect.get("height", 0))
+
+                if cw > 50 and ch > 50:
+                    ml = int(monitor.get("left", 0))
+                    mt = int(monitor.get("top", 0))
+                    mr = ml + int(monitor["width"])
+                    mb = mt + int(monitor["height"])
+
+                    left = max(ml, min(mr - 1, cl))
+                    top = max(mt, min(mb - 1, ct))
+                    right = max(left + 1, min(mr, cl + cw))
+                    bottom = max(top + 1, min(mb, ct + ch))
+                    width = right - left
+                    height = bottom - top
+
+                    if width > 50 and height > 50:
+                        region = {"left": left, "top": top, "width": width, "height": height}
+                        image_left, image_top, image_width, image_height = left, top, width, height
+            except Exception:
+                region = monitor
+
+        screenshot = sct.grab(region)
         img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-        
-        # Draw a semi-transparent grid overlay
-        # This helps the VLM localize elements much better than raw pixels
+
+        # Draw a semi-transparent grid overlay to help localization
         draw = ImageDraw.Draw(img, "RGBA")
         width, height = img.size
-        
-        # Grid settings
-        step_x = width // 10
-        step_y = height // 10
-        
-        # Draw vertical lines
+        step_x = max(1, width // 10)
+        step_y = max(1, height // 10)
         for i in range(1, 10):
             x = i * step_x
             draw.line([(x, 0), (x, height)], fill=(255, 0, 0, 128), width=2)
-            
-        # Draw horizontal lines
         for i in range(1, 10):
             y = i * step_y
             draw.line([(0, y), (width, y)], fill=(255, 0, 0, 128), width=2)
 
         # Resize image to speed up upload and processing
-        # Smaller size = faster upload = faster API response
-        max_size = 1024  # Reduced from 1280 for speed
-        if img.width > max_size:
-            ratio = max_size / img.width
-            img = img.resize((max_size, int(img.height * ratio)), Image.Resampling.BILINEAR)
-        
-        return img
+        if img.width > MAX_IMAGE_WIDTH:
+            ratio = MAX_IMAGE_WIDTH / img.width
+            img = img.resize((MAX_IMAGE_WIDTH, int(img.height * ratio)), Image.Resampling.BILINEAR)
+
+        capture_context = {
+            "image_left": image_left,
+            "image_top": image_top,
+            "image_width": image_width,
+            "image_height": image_height,
+            "monitor_left": int(monitor.get("left", 0)),
+            "monitor_top": int(monitor.get("top", 0)),
+            "physical_screen_width": int(monitor["width"]),
+            "physical_screen_height": int(monitor["height"]),
+            "logical_screen_width": int(self.width),
+            "logical_screen_height": int(self.height),
+        }
+
+        return img, capture_context
+
+    def _image_norm_to_screen_norm(self, x_norm: int, y_norm: int):
+        """
+        Map screenshot-relative (x,y) normalized coords to full-screen normalized coords.
+        If capture context is missing, returns the input unchanged.
+        """
+        ctx = self._capture_context
+        if not ctx:
+            return int(x_norm), int(y_norm)
+
+        xi = float(x_norm) / 1000.0
+        yi = float(y_norm) / 1000.0
+        x_phys = ctx["image_left"] + xi * ctx["image_width"]
+        y_phys = ctx["image_top"] + yi * ctx["image_height"]
+
+        # physical -> logical
+        sx = ctx["logical_screen_width"] / max(1, ctx["physical_screen_width"])
+        sy = ctx["logical_screen_height"] / max(1, ctx["physical_screen_height"])
+        x_log = (x_phys - ctx["monitor_left"]) * sx
+        y_log = (y_phys - ctx["monitor_top"]) * sy
+
+        xn = int(max(0, min(1000, (x_log / max(1, ctx["logical_screen_width"])) * 1000)))
+        yn = int(max(0, min(1000, (y_log / max(1, ctx["logical_screen_height"])) * 1000)))
+        return xn, yn
 
     def _track_usage(self, response, log_func):
         if hasattr(response, 'usage_metadata'):
@@ -305,13 +474,41 @@ class ComputerUseAgent:
         UNCHANGED_HASH_DISTANCE_THRESHOLD = 3  # lower = stricter; 0 means identical hash
         stuck_hint_cooldown = 0
         STUCK_HINT_COOLDOWN_TURNS = 3
+        fast_path_attempted = False
         
         with mss.mss() as sct:
             while not self.should_stop:
                 start_time = time.perf_counter()
+
+                # Fast-path: do deterministic setup once (no LLM call)
+                if not fast_path_attempted:
+                    fast_path_attempted = True
+                    fast_actions = self._fast_path_actions(user_instruction)
+                    if fast_actions:
+                        log("Running fast-path actions (no LLM)...")
+                        actions_executed = 0
+                        for line in fast_actions:
+                            if self.should_stop:
+                                log("Stop requested. Breaking fast-path actions.")
+                                break
+                            log(f"  > {line}")
+                            self.execute_action(line)
+                            actions_executed += 1
+                            time.sleep(0.05)
+                        if actions_executed > 0:
+                            prev_actions_executed = actions_executed
+                        time.sleep(0.1)
+                        continue
+
+                # Decide whether to crop screenshot to foreground window
+                crop_rect = None
+                if CROP_TO_FOREGROUND_WINDOW:
+                    crop_rect = get_foreground_window_rect()
+
                 log("Capturing screen...")
                 capture_start = time.perf_counter()
-                img = self.capture_screen(sct)
+                img, capture_context = self.capture_screen(sct, crop_rect=crop_rect)
+                self._capture_context = capture_context
                 capture_end = time.perf_counter()
                 log(f"  [Time] Screen capture: {capture_end - capture_start:.3f}s")
 
@@ -338,10 +535,23 @@ class ComputerUseAgent:
                 if stuck_hint_cooldown > 0:
                     stuck_hint_cooldown -= 1
                 
+                is_cropped = (
+                    capture_context
+                    and (capture_context["image_width"] < capture_context["physical_screen_width"]
+                         or capture_context["image_height"] < capture_context["physical_screen_height"])
+                )
+                crop_note = ""
+                if is_cropped:
+                    crop_note = (
+                        "\n\nNOTE: The attached screenshot is CROPPED to the foreground window. "
+                        "Use CLICK(x,y) with screenshot/window-relative coords (prefer UI metadata window=(x,y)). "
+                        "Only use *_SCREEN actions if you must click outside the screenshot."
+                    )
+
                 user_message = {
                     "role": "user", 
                     "parts": [
-                        f"Task: {user_instruction}\n\n{ui_metadata}\n\nCurrent screen state is attached. What are the next actions?",
+                        f"Task: {user_instruction}{crop_note}\n\n{ui_metadata}\n\nCurrent screen state is attached. What are the next actions?",
                         img
                     ]
                 }
@@ -391,12 +601,39 @@ class ComputerUseAgent:
                     else:
                         # Gemini flow
                         try:
-                            # Use timeout to prevent hanging on slow API calls
-                            response = self.model.generate_content(
-                                messages,
-                                request_options={"timeout": 60}
-                            )
-                            self._track_usage(response, log)
+                            response = None
+                            response_text = ""
+
+                            # Optional speed path: try text-only first (no screenshot).
+                            if ENABLE_TEXT_ONLY_FIRST:
+                                try:
+                                    log("  [Speed] Trying text-only call first...")
+                                    text_only_messages = list(messages)
+                                    # Remove the image from the most recent user message
+                                    last = dict(text_only_messages[-1])
+                                    if isinstance(last.get("parts"), list) and last["parts"]:
+                                        last_text = str(last["parts"][0])
+                                        last["parts"] = [last_text + "\n\n(No screenshot attached for this attempt. If UI metadata is sufficient, output ACTIONs now.)"]
+                                        text_only_messages[-1] = last
+                                    response = self.model.generate_content(
+                                        text_only_messages,
+                                        request_options={"timeout": 60}
+                                    )
+                                    self._track_usage(response, log)
+                                    response_text = getattr(response, "text", "") or ""
+                                except Exception:
+                                    response = None
+                                    response_text = ""
+
+                            # If text-only didn't produce actions, fall back to vision call.
+                            if not response or not self._response_has_actions(response_text):
+                                # Use timeout to prevent hanging on slow API calls
+                                response = self.model.generate_content(
+                                    messages,
+                                    request_options={"timeout": 60}
+                                )
+                                self._track_usage(response, log)
+                                response_text = response.text
                         except Exception as e:
                             error_str = str(e).lower()
                             if "404" in str(e) and self.model_name == 'gemini-3-flash-preview':
@@ -405,15 +642,17 @@ class ComputerUseAgent:
                                 self.model = genai.GenerativeModel(self.model_name, generation_config={"temperature": 0.0})
                                 response = self.model.generate_content(messages, request_options={"timeout": 60})
                                 self._track_usage(response, log)
+                                response_text = response.text
                             elif "timeout" in error_str or "deadline" in error_str:
                                 log("API timeout - retrying with minimal context...")
                                 # Retry with only system prompt and current screenshot
                                 minimal_messages = [messages[0], messages[-1]]
                                 response = self.model.generate_content(minimal_messages, request_options={"timeout": 60})
                                 self._track_usage(response, log)
+                                response_text = response.text
                             else:
                                 raise e
-                        response_text = response.text
+                        # response_text set above
                     
                     api_end = time.perf_counter()
                     log(f"  [Time] API: {api_end - api_start:.3f}s")
@@ -559,36 +798,62 @@ class ComputerUseAgent:
             p = p.strip().strip("'").strip('"')
             params.append(p)
 
+        # Coordinate mode:
+        # - default actions use screenshot-relative coords (mapped via capture context)
+        # - *_SCREEN actions use full-screen coords directly (no mapping)
+        coord_mode = "image"
+        if action_name.endswith("_SCREEN"):
+            coord_mode = "screen"
+            action_name = action_name[:-7]  # strip "_SCREEN"
+
+        def _xy(i: int = 0, j: int = 1):
+            x = int(float(params[i]))
+            y = int(float(params[j]))
+            if coord_mode == "screen":
+                return x, y
+            return self._image_norm_to_screen_norm(x, y)
+
         action_result = None
         try:
             start_time = time.perf_counter()
             if action_name == "CLICK":
-                click(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                click(x, y)
             elif action_name == "DOUBLE_CLICK":
-                double_click(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                double_click(x, y)
             elif action_name == "TRIPLE_CLICK":
-                triple_click(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                triple_click(x, y)
             elif action_name == "RIGHT_CLICK":
-                right_click(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                right_click(x, y)
             elif action_name == "MIDDLE_CLICK":
-                middle_click(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                middle_click(x, y)
             elif action_name == "MOVE_MOUSE":
-                move_mouse(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                move_mouse(x, y)
             elif action_name == "CLICK_AND_HOLD":
                 duration = float(params[2]) if len(params) > 2 else 1.0
-                click_and_hold(int(params[0]), int(params[1]), duration)
+                x, y = _xy(0, 1)
+                click_and_hold(x, y, duration)
             elif action_name == "SHIFT_CLICK":
-                shift_click(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                shift_click(x, y)
             elif action_name == "CTRL_CLICK":
-                ctrl_click(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                ctrl_click(x, y)
             elif action_name == "ALT_CLICK":
-                alt_click(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                alt_click(x, y)
             elif action_name == "TYPE":
                 type_text(params[0])
             elif action_name == "TYPE_UNICODE":
                 type_unicode(params[0])
             elif action_name == "CLEAR_FIELD":
-                clear_field(int(params[0]), int(params[1]))
+                x, y = _xy(0, 1)
+                clear_field(x, y)
             elif action_name == "PRESS":
                 press_key(params[0])
             elif action_name == "HOLD_KEY":
@@ -599,11 +864,14 @@ class ComputerUseAgent:
             elif action_name == "SCROLL":
                 scroll(int(params[0]))
             elif action_name == "SCROLL_AT":
-                scroll_at(int(params[0]), int(params[1]), int(params[2]))
+                x, y = _xy(0, 1)
+                scroll_at(x, y, int(params[2]))
             elif action_name == "HORIZONTAL_SCROLL":
                 horizontal_scroll(int(params[0]))
             elif action_name == "DRAG":
-                drag(int(params[0]), int(params[1]), int(params[2]), int(params[3]))
+                x1, y1 = _xy(0, 1)
+                x2, y2 = _xy(2, 3)
+                drag(x1, y1, x2, y2)
             elif action_name == "COPY":
                 copy_to_clipboard()
             elif action_name == "PASTE":
