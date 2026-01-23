@@ -275,12 +275,16 @@ class ComputerUseAgent:
             log_func(f"  [Usage] Input: {input_tokens}, Output: {output_tokens}, Cost: ${current_cost:.5f}")
             log_func(f"  [Total Usage] Input: {self.total_input_tokens}, Output: {self.total_output_tokens}, Total Cost: ${self.total_cost:.5f}")
 
-    def run_task(self, user_instruction, logger=None):
+    def run_task(self, user_instruction, logger=None, status_callback=None):
         def log(msg):
             if logger:
                 logger(msg)
             else:
                 print(msg)
+        
+        def update_status(status):
+            if status_callback:
+                status_callback(status)
 
         log(f"Starting task: {user_instruction}")
         self.should_stop = False # Reset stop flag
@@ -309,6 +313,7 @@ class ComputerUseAgent:
         with mss.mss() as sct:
             while not self.should_stop:
                 start_time = time.perf_counter()
+                update_status("looking")
                 log("Capturing screen...")
                 capture_start = time.perf_counter()
                 img = self.capture_screen(sct)
@@ -356,6 +361,7 @@ class ComputerUseAgent:
                     log(f"  [Context] {len(messages)} messages")
                 
                 try:
+                    update_status("thinking")
                     log(f"Sending to {self.model_name}...")
                     api_start = time.perf_counter()
                     
@@ -480,12 +486,25 @@ class ComputerUseAgent:
                             # Check for DONE signal
                             if "DONE" in line_upper:
                                 log("Task completed signal received.")
+                                update_status("done")
                                 is_done = True
                                 continue
                             if skip_actions_this_turn:
                                 continue
                                 
                             log(f"  > {line.strip()}")
+                            # Update status based on action type
+                            action_upper = line.upper()
+                            if "CLICK" in action_upper or "DRAG" in action_upper:
+                                update_status("clicking")
+                            elif "TYPE" in action_upper:
+                                update_status("typing")
+                            elif "SCROLL" in action_upper:
+                                update_status("scrolling")
+                            elif "WAIT" in action_upper:
+                                update_status("waiting")
+                            else:
+                                update_status("acting")
                             result = self.execute_action(line)
                             if result:
                                 action_results.append(result)

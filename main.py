@@ -89,52 +89,120 @@ class App:
         if self.emergency_root:
             return
             
-        self.emergency_root = tk.Toplevel(self.root)
+        self.emergency_root = tk.Toplevel() # Independent from self.root to stay visible when minimized
         self.emergency_root.attributes("-topmost", True)
         self.emergency_root.overrideredirect(True)
         
-        # Use Windows-specific transparency trick for rounded corners
-        bg_transparent = '#000001' # Very specific color to make transparent
+        # Modern frosted glass style - dark semi-transparent background
+        bg_transparent = '#000001'
+        bg_dark = '#1a1a1a'
         self.emergency_root.config(bg=bg_transparent)
         self.emergency_root.attributes("-transparentcolor", bg_transparent)
+        self.emergency_root.attributes("-alpha", 0.92)
         
         # Position at top center
         screen_width = self.emergency_root.winfo_screenwidth()
-        w, h = 320, 70
+        w = 320
+        h = 110
         x = (screen_width // 2) - (w // 2)
-        y = 20
+        y = 30
         self.emergency_root.geometry(f"{w}x{h}+{x}+{y}")
         
-        canvas = tk.Canvas(self.emergency_root, width=w, height=h, bg=bg_transparent, highlightthickness=0)
-        canvas.pack(fill=tk.BOTH, expand=True)
+        self.emergency_canvas = tk.Canvas(self.emergency_root, width=w, height=h, bg=bg_transparent, highlightthickness=0)
+        self.emergency_canvas.pack(fill=tk.BOTH, expand=True)
         
-        # Color matching the provided image
-        color_normal = "#F24E5C" 
-        color_hover = "#F56E7A"
+        canvas = self.emergency_canvas
         
-        # Draw rounded rectangle
-        radius = 30
+        # Rounded rectangle helper
         def create_rounded_rect(x1, y1, x2, y2, r, **kwargs):
             points = [x1+r, y1, x1+r, y1, x2-r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y1+r, x2, y2-r, x2, y2-r, x2, y2, x2-r, y2, x2-r, y2, x1+r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y2-r, x1, y1+r, x1, y1+r, x1, y1]
             return canvas.create_polygon(points, **kwargs, smooth=True)
 
-        self.rect = create_rounded_rect(5, 5, w-5, h-5, radius, fill=color_normal)
-        self.text = canvas.create_text(w//2, h//2, text="🛑  EMERGENCY STOP  🛑", fill="white", font=("Segoe UI", 14, "bold"))
+        self.main_bg = create_rounded_rect(0, 0, w, h, 20, fill=bg_dark, outline='#333333', width=1)
+        
+        self.status_text = canvas.create_text(
+            w//2,
+            32,
+            text="🧠 Thinking...",
+            fill="#ffffff",
+            font=("Segoe UI", 13),
+        )
+        
+        canvas.create_line(20, 58, w-20, 58, fill='#3a3a3a', width=1)
+        
+        btn_y1, btn_y2 = 68, 98
+        btn_x1, btn_x2 = w//2 - 60, w//2 + 60
+        stop_color, stop_hover = "#e74c3c", "#ff6b5b"
+        
+        self.rect = create_rounded_rect(btn_x1, btn_y1, btn_x2, btn_y2, 15, fill=stop_color, outline='')
+        self.text = canvas.create_text(
+            w//2,
+            (btn_y1 + btn_y2) // 2,
+            text="STOP",
+            fill="white",
+            font=("Segoe UI", 12, "bold"),
+        )
         
         def on_click(e):
             self.toggle_agent()
             
         def on_enter(e):
-            canvas.itemconfig(self.rect, fill=color_hover)
-            
+            canvas.itemconfig(self.rect, fill=stop_hover)
         def on_leave(e):
-            canvas.itemconfig(self.rect, fill=color_normal)
+            canvas.itemconfig(self.rect, fill=stop_color)
             
-        # Bind events to both shape and text
         for item in (self.rect, self.text):
             canvas.tag_bind(item, "<Button-1>", on_click)
             canvas.tag_bind(item, "<Enter>", on_enter)
             canvas.tag_bind(item, "<Leave>", on_leave)
+        
+        # Draggable logic
+        self._drag_data = {"x": 0, "y": 0}
+        def start_drag(e):
+            self._drag_data["x"] = e.x
+            self._drag_data["y"] = e.y
+        def drag(e):
+            dx, dy = e.x - self._drag_data["x"], e.y - self._drag_data["y"]
+            nx, ny = self.emergency_root.winfo_x() + dx, self.emergency_root.winfo_y() + dy
+            self.emergency_root.geometry(f"+{nx}+{ny}")
+        
+        canvas.tag_bind(self.main_bg, "<Button-1>", start_drag)
+        canvas.tag_bind(self.main_bg, "<B1-Motion>", drag)
+        canvas.tag_bind(self.status_text, "<Button-1>", start_drag)
+        canvas.tag_bind(self.status_text, "<B1-Motion>", drag)
+
+        # Persistence Loop: Ensure it stays on top every 2 seconds
+        def keep_topmost():
+            if self.emergency_root:
+                try:
+                    self.emergency_root.attributes("-topmost", True)
+                    self.emergency_root.lift()
+                    self.emergency_root.after(2000, keep_topmost)
+                except: pass
+        keep_topmost()
+
+    def update_agent_status(self, status):
+        """Update the status display in the emergency stop overlay"""
+        if self.emergency_root and hasattr(self, 'status_text') and hasattr(self, 'emergency_canvas') and self.emergency_canvas:
+            status_map = {
+                "thinking": "🧠 Thinking...",
+                "looking": "👁️ Looking at screen...",
+                "clicking": "🖱️ Clicking...",
+                "typing": "⌨️ Typing...",
+                "scrolling": "📜 Scrolling...",
+                "waiting": "⏳ Waiting...",
+                "acting": "⚡ Acting...",
+                "done": "✅ Done!",
+            }
+            display_text = status_map.get(status.lower(), f"🔄 {status}")
+            try:
+                self.emergency_canvas.itemconfig(self.status_text, text=display_text)
+                # If status is "done", ensure we stay visible
+                if status.lower() == "done":
+                    self.emergency_root.attributes("-topmost", True)
+                    self.emergency_root.lift()
+            except tk.TclError:
+                pass
 
     def hide_emergency_stop(self):
         if self.emergency_root:
@@ -213,8 +281,10 @@ class App:
         try:
             # Small delay to ensure window is minimized before first screenshot
             time.sleep(0.5)
-            # Pass a logger function to the agent
-            self.agent.run_task(instruction, logger=self.log)
+            # Pass a logger function and status callback to the agent
+            def status_updater(status):
+                self.root.after(0, lambda s=status: self.update_agent_status(s))
+            self.agent.run_task(instruction, logger=self.log, status_callback=status_updater)
             
             self.root.after(0, self.on_task_complete)
         except Exception as e:
@@ -225,11 +295,14 @@ class App:
         self.is_running = False
         self.run_button.config(text="Run Agent")
         self.status_label.config(text="Status: Idle")
-        # Hide emergency stop button
-        self.hide_emergency_stop()
-        # Restore window
+        
+        # Show "Done" state for a few seconds before disappearing
+        self.update_agent_status("done")
+        self.root.after(3000, self.hide_emergency_stop)
+        
+        # Restore main window
         self.root.deiconify()
-        self.root.attributes("-topmost", True) # Ensure it comes to front
+        self.root.attributes("-topmost", True)
 
 if __name__ == "__main__":
     root = tk.Tk()
