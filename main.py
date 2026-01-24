@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import time
+import os
 from agent import ComputerUseAgent
 
 class App:
@@ -21,34 +22,12 @@ class App:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # API Keys
-        ttk.Label(main_frame, text="Gemini API Key:").pack(anchor=tk.W)
-        self.api_key_entry = ttk.Entry(main_frame, show="*")
-        self.api_key_entry.pack(fill=tk.X, pady=2)
-        
-        ttk.Label(main_frame, text="X.AI API Key (for Grok):").pack(anchor=tk.W)
-        self.xai_key_entry = ttk.Entry(main_frame, show="*")
-        self.xai_key_entry.pack(fill=tk.X, pady=2)
-        
-        # Load keys from env if available
-        import os
-        gemini_key = os.environ.get("GOOGLE_API_KEY", "")
-        if gemini_key:
-            self.api_key_entry.insert(0, gemini_key)
-        
-        xai_key = os.environ.get("XAI_API_KEY", "")
-        if xai_key:
-            self.xai_key_entry.insert(0, xai_key)
-
         # Model Selection
         ttk.Label(main_frame, text="Select Model:").pack(anchor=tk.W)
         self.model_var = tk.StringVar()
         self.model_combo = ttk.Combobox(main_frame, textvariable=self.model_var, state="readonly")
         self.model_combo['values'] = (
             'gemini-3-flash-preview',
-            'gemini-2.0-flash-thinking-exp-01-21',
-            'gemini-2.0-flash',
-            'grok-4-1-fast-non-reasoning'
         )
         self.model_combo.set('gemini-3-flash-preview')
         self.model_combo.pack(fill=tk.X, pady=5)
@@ -222,8 +201,7 @@ class App:
         self.log_text.config(state=tk.DISABLED)
 
     def toggle_agent(self):
-        gemini_key = self.api_key_entry.get().strip()
-        xai_key = self.xai_key_entry.get().strip()
+        gemini_key = os.environ.get("GOOGLE_API_KEY", "").strip()
         
         if not self.is_running:
             instruction = self.instruction_entry.get("1.0", tk.END).strip()
@@ -233,12 +211,9 @@ class App:
 
             model_name = self.model_var.get()
             
-            # Check keys based on selected model
-            if model_name.startswith('grok') and not xai_key:
-                messagebox.showerror("Error", "Please enter your X.AI API Key for Grok models.")
-                return
-            elif not model_name.startswith('grok') and not gemini_key:
-                messagebox.showerror("Error", "Please enter your Gemini API Key.")
+            # Check keys
+            if not gemini_key:
+                messagebox.showerror("Error", "Gemini API Key (GOOGLE_API_KEY) not found in environment.")
                 return
 
             self.is_running = True
@@ -253,7 +228,7 @@ class App:
             self.root.iconify()
             
             # Initialize agent if needed
-            api_keys = {"gemini": gemini_key, "xai": xai_key}
+            api_keys = {"gemini": gemini_key}
             if not self.agent:
                 self.agent = ComputerUseAgent(api_keys=api_keys, model_name=model_name)
             else:

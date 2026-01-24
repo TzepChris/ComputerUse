@@ -405,13 +405,7 @@ class ComputerUseAgent:
                             self._track_usage(response, log)
                         except Exception as e:
                             error_str = str(e).lower()
-                            if "404" in str(e) and self.model_name == 'gemini-3-flash-preview':
-                                log("Gemini 3 Flash not found, falling back to Gemini 2.0 Flash...")
-                                self.model_name = 'gemini-2.0-flash'
-                                self.model = genai.GenerativeModel(self.model_name, generation_config={"temperature": 0.0})
-                                response = self.model.generate_content(messages, request_options={"timeout": 60})
-                                self._track_usage(response, log)
-                            elif "timeout" in error_str or "deadline" in error_str:
+                            if "timeout" in error_str or "deadline" in error_str:
                                 log("API timeout - retrying with minimal context...")
                                 # Retry with only system prompt and current screenshot
                                 minimal_messages = [messages[0], messages[-1]]
