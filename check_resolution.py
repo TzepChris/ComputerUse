@@ -1,5 +1,6 @@
 import pyautogui
-import mss
+import mssfirstry.txxt
+print("Hello from firstry.txxt")
 
 print("--- PyAutoGUI (Logical) ---")
 width, height = pyautogui.size()
